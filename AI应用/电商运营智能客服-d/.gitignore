@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dump.rdb
+.env
+chroma_db/
+node_modules/
+dist/

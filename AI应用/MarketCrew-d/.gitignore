@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+chat_history/
+market_program/
+.streamlit/
+.vscode/
+.env

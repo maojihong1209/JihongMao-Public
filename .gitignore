@@ -1,0 +1,11 @@
+# 排除其他项目，不上传 GitHub
+AI应用/MarketCrew/
+AI应用/TrainFile/
+AI应用/服装推荐智能客服/
+AI应用/电商运营智能客服/
+AI应用/营销战略协作智能体/
+数据分析/
+日常训练/
+机器学习/
+.idea/
+.vscode/
