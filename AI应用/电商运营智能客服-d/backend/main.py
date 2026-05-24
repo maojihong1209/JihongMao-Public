@@ -143,7 +143,7 @@ async def rename_session(
 
 @app.post("/chat")
 async def chat(request: ChatRequest, current_user: User = Depends(get_current_user)):
-    output = await agent.run(
+    output = await agent.invoke(
         user_id=current_user.id,
         username=current_user.username,
         session_id=request.session_id,
@@ -155,7 +155,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
     async def event_stream():
-        async for event in agent.run_stream(
+        async for event in agent.run(
             user_id=current_user.id,
             username=current_user.username,
             session_id=request.session_id,
