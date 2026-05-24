@@ -127,8 +127,8 @@ class CustomerServiceAgent:
 
         return outcome
 
-    async def run(self, user_id, username, session_id, input_text):
-        """SSE 流式运行，逐 token 输出。"""
+    async def stream(self, user_id, username, session_id, input_text):
+        """SSE 流式，逐 token 输出。"""
         cache_key = f"short_memory:{user_id}:{session_id}"
         async with cache_lock:
             short_history = list(short_term_cache.get(cache_key, []))

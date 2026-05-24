@@ -155,7 +155,7 @@ async def chat(request: ChatRequest, current_user: User = Depends(get_current_us
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user)):
     async def event_stream():
-        async for event in agent.run(
+        async for event in agent.stream(
             user_id=current_user.id,
             username=current_user.username,
             session_id=request.session_id,
