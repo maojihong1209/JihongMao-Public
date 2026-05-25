@@ -1,18 +1,17 @@
 # 电商运营智能客服
 
-基于 LangGraph + RAG 的电商智能客服系统，支持意图识别、多轮对话、订单查询、投诉分析和知识库管理。
+基于 LangChain + RAG 的电商智能客服系统，支持意图识别、多轮对话、订单查询、投诉分析和知识库管理。
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
 | 后端框架 | FastAPI + Uvicorn |
-| Agent 编排 | LangGraph（状态图驱动） |
+| Agent 编排 | 意图路由 + Handler 分发 |
 | 大模型 | 通义千问（Qwen3-Max / Qwen-Turbo） |
 | 向量检索 | ChromaDB + text-embedding-v4 + BM25（RRF 融合） |
 | 关系数据库 | PostgreSQL（information_db / chat_db 双 Schema） |
-| 缓存 & 记忆 | Redis（历史缓存 + 摘要持久化） |
-| 数据库迁移 | Alembic |
+| 缓存 & 记忆 | Redis + TTLCache（三层渐进遗忘记忆） |
 | 前端 | React 18 + TypeScript + Vite + TailwindCSS |
 
 ## 项目结构
@@ -21,14 +20,14 @@
 电商运营智能客服/
 ├── backend/
 │   ├── main.py              # FastAPI 入口，14 个 API 端点
-│   ├── agent.py             # LangGraph Agent（意图→闲聊/咨询/查询/投诉）
-│   ├── intent_classifier.py # 意图分类器
+│   ├── agent.py             # 客服 Agent（意图→闲聊/咨询/查询/投诉）
+│   ├── intent_classifier.py # 意图分类器（Qwen-Turbo + Few-shot）
 │   ├── vector_stores.py     # RAG 服务（ChromaDB + BM25 + RRF）
-│   ├── knowledge_base.py    # 知识库向量化与检索
+│   ├── knowledge_base.py    # 知识库管理（多路线切分 + ChromaDB）
 │   ├── memory_manager.py    # 三层渐进遗忘记忆管理
 │   ├── file_history_store.py# 对话持久化（PostgreSQL + Redis）
 │   ├── order_service.py     # 订单查询服务
-│   ├── file_parser.py       # 文件解析（txt/pdf/docx）
+│   ├── file_parser.py       # 文件解析（txt/pdf/docx/csv/md，PDF 含 OCR 兜底）
 │   ├── schema.py / config_data.py
 │   ├── auth/                # 认证模块（JWT + bcrypt）
 │   ├── chat/                # ChatMessage ORM 模型
@@ -39,6 +38,7 @@
 │       ├── api/             # Axios API 封装
 │       ├── types/           # TypeScript 类型定义
 │       └── hooks/           # React Hooks
+├── tests/                   # pytest 测试套件
 ├── requirements.txt
 └── start.txt
 ```
@@ -64,11 +64,11 @@
 
 | 层 | 存储 | 容量 | 生命周期 |
 |---|---|---|---|
-| 活跃窗口 | Python TTLCache | 最近 20 轮原文 | 1 小时 |
-| 对话摘要 | Redis | 压缩摘要（≤200 字） | 永久（删除会话时清理） |
-| 核心事实 | Redis | 用户偏好/需求要点（≤5 条） | 永久（删除会话时清理） |
+| 活跃窗口 | Python TTLCache | 最近 10 轮原文 | 24 小时 |
+| 对话摘要 | Redis | 压缩摘要（≤200 字，增量合并） | 永久（删除会话时清理） |
+| 完整历史 | PostgreSQL | 每轮对话原文 | 永久 |
 
-超过 10 轮后，最早对话自动压缩进摘要层；用户提起旧话题时，摘要 + 核心事实注入 prompt 兜底。
+超过 8 轮后，最早对话自动压缩进摘要层；用户提起旧话题时，摘要注入 prompt 兜底。
 
 ## API 列表
 
@@ -88,6 +88,14 @@
 | `/kb/files/{file_id}` | GET | 文件详情及 chunk 列表 |
 | `/kb/files/{file_id}` | DELETE | 删除文件（软删 + ChromaDB 清理） |
 | `/kb/chunks/{chunk_id}` | DELETE | 删除单条 chunk |
+
+## 知识库管理
+
+- **多路线切分**：MD 文件按标题层级（#/##/###）结构化切分，CSV 按行切分，其余格式递归切分；无标题的 MD 自动降级为递归切分
+- **去重**：SHA-256 文件哈希，存在即跳过
+- **存储**：PostgreSQL `knowledge_files` 表存文件元数据，ChromaDB 存向量 + chunk
+- **管理**：前端双 Tab（文件列表 / 上传），支持分页、chunk 预览、单 chunk 删除
+- **软删除**：删除文件时 DB 标记 `deleted` + ChromaDB 清理对应 chunk
 
 ## 启动步骤
 
@@ -155,14 +163,7 @@ information_db          chat_db
 ├── users               ├── chat_messages
 ├── order_tb            └── alembic_version
 ├── product_tb
-└── knowledge_tb
+└── knowledge_files
 ```
 
 业务数据（用户、订单、商品、知识库）与对话数据分离在不同 Schema，便于独立备份和权限管理。
-
-## 知识库管理
-
-- **去重**：SHA-256 文件哈希，存在即跳过
-- **存储**：PostgreSQL `knowledge_tb` 存文件元数据，ChromaDB 存向量 + chunk
-- **管理**：前端双 Tab（文件列表 / 上传），支持分页、chunk 预览、单 chunk 删除
-- **软删除**：删除文件时 DB 标记 `deleted` + ChromaDB 清理对应 chunk
