@@ -107,7 +107,7 @@ class CustomerServiceAgent:
         async with cache_lock:
             short_history.append({"role": "user", "content": input_text})
             short_history.append({"role": "agent", "content": full_content})
-            short_term_cache[cache_key] = short_history[-20:]
+            short_term_cache[cache_key] = short_history[-10:]
 
         from file_history_store import save_chat_turn_async
         ai_resp = AIResponse(type=ai_type, content=full_content,
@@ -157,7 +157,7 @@ class CustomerServiceAgent:
         async with cache_lock:
             short_history.append({"role": "user", "content": input_text})
             short_history.append({"role": "agent", "content": full_content})
-            short_term_cache[cache_key] = short_history[-20:]
+            short_term_cache[cache_key] = short_history[-10:]
 
         # 持久化到 PostgreSQL
         from file_history_store import save_chat_turn_async
