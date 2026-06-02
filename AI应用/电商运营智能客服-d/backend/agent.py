@@ -116,7 +116,6 @@ class CustomerServiceAgent:
         )
 
         asyncio.create_task(self.update_user_tags(user_id, short_history))
-        asyncio.create_task(self.memory.update_memory(self.db_factory, user_id, session_id))
 
         return outcome
 
@@ -164,7 +163,6 @@ class CustomerServiceAgent:
 
         # 异步任务
         asyncio.create_task(self.update_user_tags(user_id, short_history))
-        asyncio.create_task(self.memory.update_memory(self.db_factory, user_id, session_id))
 
     # ============================================================
     # Handler（按意图分发）
