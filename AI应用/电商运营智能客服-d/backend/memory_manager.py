@@ -1,7 +1,7 @@
-import os, json, logging
+import os, logging
 from langchain_community.chat_models.tongyi import ChatTongyi
 from dotenv import load_dotenv
-from file_history_store import sync_redis
+from file_history_store import get_short_memory, get_session_summary, set_session_summary
 import config_data as config
 
 load_dotenv()
@@ -19,13 +19,12 @@ SUMMARY_PROMPT = """你是一个对话摘要助手。下面是新的对话片段
 
 
 class MemoryManager:
-    """三层渐进遗忘记忆管理器。
+    """两层渐进遗忘记忆管理器。
 
-    Layer 1 — 活跃窗口: 最近 10 轮对话全文（agent 内存 TTLCache）
-    Layer 2 — 对话摘要: 超窗口部分压缩为摘要（存 Redis）
-    Layer 3 — 完整历史: 每轮对话原文（存 PostgreSQL）
+    Layer 1 — 短期记忆: 近 10 轮对话原文（Redis，多 worker 共享，TTL 24h）
+    Layer 2 — 长期记忆: 会话摘要 + 完整历史（PostgreSQL）
 
-    遗忘曲线: 最近 6 轮逐字保留 → 摘要逐步压缩 → 旧对话自然淡出
+    遗忘曲线: 最近 6 轮逐字保留 → 超出部分 LLM 压缩为摘要 → 永久存 PG
     """
 
     def __init__(self):
@@ -34,40 +33,24 @@ class MemoryManager:
             api_key=os.environ.get("DASHSCOPE_API_KEY"),
         )
 
-    # ---- Redis key 命名 ----
-    @staticmethod
-    def _summary_key(session_id: str) -> str:
-        return f"memory_summary:{session_id}"
-
-    # ---- 读写 Redis ----
-    def _get_summary(self, session_id: str) -> str:
-        try:
-            return sync_redis.get(self._summary_key(session_id)) or ""
-        except Exception:
-            return ""
-
-    def _set_summary(self, session_id: str, text: str):
-        try:
-            sync_redis.set(self._summary_key(session_id), text)
-        except Exception:
-            pass
-
     # ---- 上下文构建 ----
-    def build_memory_prefix(self, session_id: str) -> str:
-        """构建记忆前缀（对话摘要），用于已有独立历史管理的意图。"""
-        summary = self._get_summary(session_id)
+
+    async def build_memory_prefix(self, db_factory, session_id: str) -> str:
+        """构建记忆前缀（PG 摘要），用于咨询/查询意图。"""
+        summary = await get_session_summary(db_factory, session_id)
         return f"[前期对话摘要]\n{summary}" if summary else ""
 
-    def build_context(self, session_id: str, system_prompt: str,
-                      input_text: str, short_history: list) -> str:
-        """构建完整 prompt 上下文，包含三层记忆。"""
-        recent = short_history[-10:] if len(short_history) > 0 else []
+    async def build_context(self, db_factory, user_id: int, session_id: str,
+                            system_prompt: str, input_text: str) -> str:
+        """构建完整 prompt 上下文（Redis 短期记忆 + PG 摘要）。"""
+        short_history = get_short_memory(user_id, session_id)
+        recent = short_history[-10:] if short_history else []
         recent_str = "\n".join(
             [f"{'用户' if m['role'] == 'user' else '客服'}: {m['content'][:300]}"
              for m in recent]
         ) if recent else "（无近期对话）"
 
-        summary = self._get_summary(session_id)
+        summary = await get_session_summary(db_factory, session_id)
 
         parts = [system_prompt]
 
@@ -79,40 +62,45 @@ class MemoryManager:
 
         return "\n".join(parts)
 
-    # ---- 记忆更新（渐进压缩） ----
-    def update_memory(self, session_id: str, short_history: list):
-        """当活跃窗口超过阈值时，将最早的对话压缩进摘要。"""
-        if len(short_history) <= 8:
-            return  # 还不够长，无需压缩
+    # ---- 记忆更新（异步，直接跑在 event loop 中）----
 
-        overflow = short_history[:-6]  # 超过6条的部分
+    async def update_memory(self, db_factory, user_id: int, session_id: str):
+        """当短期记忆超过阈值时，将最早对话压缩进摘要（存 PG）。"""
+        short_history = get_short_memory(user_id, session_id)
+        if len(short_history) <= 8:
+            return
+
+        overflow = short_history[:-6]
         if len(overflow) < 2:
             return
 
-        to_compress = overflow[-4:]  # 取最早的2轮(4条消息)进行压缩
+        to_compress = overflow[-4:]
         turns_str = "\n".join(
             [f"{'用户' if m['role'] == 'user' else '客服'}: {m['content'][:200]}"
              for m in to_compress]
         )
 
-        existing = self._get_summary(session_id)
+        existing = await get_session_summary(db_factory, session_id)
 
         try:
             prompt = SUMMARY_PROMPT.format(
                 existing_summary=existing or "（无）",
                 new_turns=turns_str,
             )
-            resp = self.llm.invoke(prompt)
+            resp = await self.llm.ainvoke(prompt)
             new_summary = resp.content if hasattr(resp, 'content') else str(resp)
             new_summary = new_summary.strip()
-            self._set_summary(session_id, new_summary)
+            await set_session_summary(db_factory, session_id, new_summary)
             logger.info(f"会话 {session_id} 摘要已更新 ({len(new_summary)} 字)")
         except Exception:
             logger.exception("记忆压缩失败")
 
-    def clear_memory(self, session_id: str):
-        """删除会话的记忆缓存。"""
+    # ---- 清理 ----
+
+    async def clear_memory(self, db_factory, user_id: int, session_id: str):
+        """删除会话的所有记忆（PG 摘要清理已由 delete_session_data 处理）。"""
+        from file_history_store import delete_short_memory
         try:
-            sync_redis.delete(self._summary_key(session_id))
+            delete_short_memory(user_id, session_id)
         except Exception:
             pass

@@ -117,7 +117,7 @@ async def delete_session(
     if not session_id.startswith(f"{current_user.id}_{current_user.username}_"):
         raise HTTPException(403, "无权操作此会话")
     from file_history_store import delete_session_data_async
-    await delete_session_data_async(session_id, AsyncSessionLocal)
+    await delete_session_data_async(session_id, AsyncSessionLocal, user_id=current_user.id)
     return {"status": "deleted"}
 
 
@@ -185,7 +185,7 @@ async def upload_file(file: UploadFile = File(...), current_user: User = Depends
 
     content = await file.read()
     text = await asyncio.to_thread(parse_file, file.filename, content)
-    chunk_count, file_hash = kb_service.upload_str(text, file.filename)
+    chunk_count, file_hash, split_method = kb_service.upload_str(text, file.filename, ext)
 
     from sqlalchemy import select
     async with AsyncSessionLocal() as db:

@@ -7,12 +7,10 @@ from order_service import OrderService
 from schema import AIResponse
 from vector_stores import RagService
 from memory_manager import MemoryManager
-from cachetools import TTLCache
+from file_history_store import get_short_memory, set_short_memory
 
 logger = logging.getLogger(__name__)
 load_dotenv()
-short_term_cache = TTLCache(maxsize=1000, ttl=config.SHORT_TERM_MEMORY_TTL)
-cache_lock = asyncio.Lock()
 
 
 def check_compliance_text(text: str) -> bool:
@@ -91,9 +89,7 @@ class CustomerServiceAgent:
         """非流式调用，返回 ChatOutput。"""
         from schema import ChatOutput
 
-        cache_key = f"short_memory:{user_id}:{session_id}"
-        async with cache_lock:
-            short_history = list(short_term_cache.get(cache_key, []))
+        short_history = get_short_memory(user_id, session_id)
 
         intent = await self.intent_classifier.aclassify(input_text)
         handler = self.handlers.get(intent, self.handle_unknown)
@@ -104,10 +100,9 @@ class CustomerServiceAgent:
         complaint_level = result.get("complaint_level")
         complaint_type = result.get("complaint_type")
 
-        async with cache_lock:
-            short_history.append({"role": "user", "content": input_text})
-            short_history.append({"role": "agent", "content": full_content})
-            short_term_cache[cache_key] = short_history[-10:]
+        short_history.append({"role": "user", "content": input_text})
+        short_history.append({"role": "agent", "content": full_content})
+        set_short_memory(user_id, session_id, short_history)
 
         from file_history_store import save_chat_turn_async
         ai_resp = AIResponse(type=ai_type, content=full_content,
@@ -121,17 +116,13 @@ class CustomerServiceAgent:
         )
 
         asyncio.create_task(self.update_user_tags(user_id, short_history))
-        asyncio.create_task(asyncio.to_thread(
-            self.memory.update_memory, session_id, short_history,
-        ))
+        asyncio.create_task(self.memory.update_memory(self.db_factory, user_id, session_id))
 
         return outcome
 
     async def stream(self, user_id, username, session_id, input_text):
         """SSE 流式，逐 token 输出。"""
-        cache_key = f"short_memory:{user_id}:{session_id}"
-        async with cache_lock:
-            short_history = list(short_term_cache.get(cache_key, []))
+        short_history = get_short_memory(user_id, session_id)
 
         if not check_compliance_text(input_text):
             blocked = "抱歉，您的消息包含不当内容，请文明交流。"
@@ -153,11 +144,10 @@ class CustomerServiceAgent:
         complaint_level = result.get("complaint_level")
         complaint_type = result.get("complaint_type")
 
-        # 更新短期记忆
-        async with cache_lock:
-            short_history.append({"role": "user", "content": input_text})
-            short_history.append({"role": "agent", "content": full_content})
-            short_term_cache[cache_key] = short_history[-10:]
+        # 更新短期记忆（Redis）
+        short_history.append({"role": "user", "content": input_text})
+        short_history.append({"role": "agent", "content": full_content})
+        set_short_memory(user_id, session_id, short_history)
 
         # 持久化到 PostgreSQL
         from file_history_store import save_chat_turn_async
@@ -174,9 +164,7 @@ class CustomerServiceAgent:
 
         # 异步任务
         asyncio.create_task(self.update_user_tags(user_id, short_history))
-        asyncio.create_task(asyncio.to_thread(
-            self.memory.update_memory, session_id, short_history,
-        ))
+        asyncio.create_task(self.memory.update_memory(self.db_factory, user_id, session_id))
 
     # ============================================================
     # Handler（按意图分发）
@@ -184,7 +172,7 @@ class CustomerServiceAgent:
 
     async def handle_chitchat(self, user_id, username, session_id, input_text, short_history):
         events = []
-        prompt = self.memory.build_context(session_id, CHITCHAT_SYSTEM_PROMPT, input_text, short_history)
+        prompt = await self.memory.build_context(self.db_factory, user_id, session_id, CHITCHAT_SYSTEM_PROMPT, input_text)
         prompt += "\n小鸿："
         full_content = ""
         async for chunk in self.chat_llm.astream(prompt):
@@ -212,7 +200,7 @@ class CustomerServiceAgent:
             return {"events": events, "full_content": full_content, "ai_type": "text"}
 
         try:
-            memory_prefix = self.memory.build_memory_prefix(session_id)
+            memory_prefix = await self.memory.build_memory_prefix(self.db_factory, session_id)
             rag_input = f"{memory_prefix}\n\n用户问题：{input_text}" if memory_prefix else input_text
             full_content = await self.rag_service.chain.ainvoke(
                 {"input": rag_input},
@@ -226,7 +214,7 @@ class CustomerServiceAgent:
 
     async def handle_query(self, user_id, username, session_id, input_text, short_history):
         events = []
-        memory_prefix = self.memory.build_memory_prefix(session_id)
+        memory_prefix = await self.memory.build_memory_prefix(self.db_factory, session_id)
         order_text = await self.do_query(user_id, input_text)
 
         if memory_prefix:
